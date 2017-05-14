@@ -1,3 +1,6 @@
+import types
+import inspect
+
 class Function(object):
 
     __slots__ = [
@@ -14,7 +17,7 @@ class Function(object):
         self.func_name = self.__name__ = name or code.co_name
         self.func_defaults = tuple(defaults)
         self.func_globals = globs
-        self.func_locals = self._vm.frame.f_locals
+        self.func_locals = self._vm.frame.local_names
         self.__dict__ = {}
         self.func_closure = closure
         self.__doc__ = code.co_consts[0] if code.co_consts else None

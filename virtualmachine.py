@@ -1,3 +1,12 @@
+from function import Function
+from frame import Frame
+
+import collections
+import operator
+import textwrap
+import dis
+import sys
+
 class VirtualMachineError(Exception):
     pass
 
@@ -42,7 +51,7 @@ class VirtualMachine(object):
         else:
             self.frame = None
 
-    def run_frame(self):
+    def run_frame(self, frame):
         self.push_frame(frame)
         while True:
             byte_name, arguments = self.parse_byte_and_args()
@@ -112,7 +121,7 @@ class VirtualMachine(object):
     def dispatch(self, byte_name, argument):
         why = None
         try:
-            bytecode_fn = getattr(self, 'byte_%s' % bytename, None)
+            bytecode_fn = getattr(self, 'byte_%s' % byte_name, None)
             if bytecode_fn is None:
                 if byte_name.startswith('UNARY_'):
                     self.unaryOperator(byte_name[6:])
@@ -143,10 +152,10 @@ class VirtualMachine(object):
         else:
             offset = 0
 
-        while len(self.frame.stack) > block.level + offset:
+        while len(self.frame.stack) > block.stack_height + offset:
             self.pop()
 
-        if block.type = 'except-handler':
+        if block.type == 'except-handler':
             traceback, value, exctype = self.popn(3)
             self.last_exception = exctype, value, traceback
 
@@ -183,3 +192,190 @@ class VirtualMachine(object):
             return why
 
         return why
+
+    def jump(self, jump):
+        self.frame.last_instruction = jump
+
+    def byte_LOAD_CONST(self, const):
+        self.push(const)
+
+    def byte_POP_TOP(self):
+        self.pop()
+
+    def byte_LOAD_NAME(self, name):
+        frame = self.frame
+        if name in frame.local_names:
+            val = frame.local_names[name]
+        elif name in frame.global_names:
+            val = frame.global_names[name]
+        elif name in frame.builtin_names:
+            val = frame.builtin_names[name]
+        else:
+            raise NameError("name '%s' is not defined" % name)
+
+        self.push(val)
+
+    def byte_STORE_NAME(self, name):
+        self.frame.local_names[name] = self.pop()
+
+    def byte_LOAD_FAST(self, name):
+        if name in self.frame.local_names:
+            val = self.frame.local_names[name]
+        else:
+            raise UnboundLocalError("local variable '%s' referenced before assignment" % name)
+
+        self.push(val)
+
+    def byte_STORE_FAST(self, name):
+        self.frame.local_names[name] = self.pop()
+
+    def byte_LOAD_GLOBAL(self, name):
+        f = self.frame
+        if name in f.global_names:
+            val = f.global_names[name]
+        elif name in f.builtin_names:
+            val = f.builtin_names[name]
+        else:
+            raise NameError("global name '%s' is not defined" % name)
+
+        self.push(val)
+
+    BINARY_OPERATORS = {
+        'POWER':    pow,
+        'MULTIPLY': operator.mul,
+        'FLOOR_DIVIDE': operator.floordiv,
+        'TRUE_DIVIDE':  operator.truediv,
+        'MODULO':   operator.mod,
+        'ADD':      operator.add,
+        'SUBTRACT': operator.sub,
+        'SUBSCR':   operator.getitem,
+        'LSHIFT':   operator.lshift,
+        'RSHIFT':   operator.rshift,
+        'AND':      operator.and_,
+        'XOR':      operator.xor,
+        'OR':       operator.or_,
+    }
+
+    def binaryOperator(self, op):
+        x, y = self.popn(2)
+        self.push(self.BINARY_OPERATORS[op](x, y))
+
+    COMPARE_OPERATORS = [
+        operator.lt,
+        operator.le,
+        operator.eq,
+        operator.ne,
+        operator.gt,
+        operator.ge,
+        lambda x, y: x in y,
+        lambda x, y: x not in y,
+        lambda x, y: x is y,
+        lambda x, y: x is not y,
+        lambda x, y: issubclass(x, Exception) and issubclass(x, y),
+    ]
+
+    def byte_COMPARE_OP(self, opnum):
+        x, y = self.popn(2)
+        self.push(self.COMPARE_OPERATORS[opnum](x, y))
+
+    def byte_LOAD_ATTR(self, attr):
+        obj = self.pop()
+        val = getattr(obj, attr)
+        self.push(val)
+
+    def byte_STORE_ATTR(self, name):
+        val, obj = self.popn(2)
+        setattr(obj, name, val)
+
+    def byte_BUILD_LIST(self, count):
+        elts = self.popn(counts)
+        self.push(elts)
+
+    def byte_BUILD_MAP(self, size):
+        self.push({})
+
+    def byte_STORE_MAP(self):
+        the_map, val, key = self.popn(3)
+        the_map[key] = val
+        self.push(the_map)
+
+    def byte_LIST_APPEND(self, count):
+        val = self.pop()
+        the_list = self.frame.stack[-count]
+        the_list.append(val)
+
+    def byte_JUMP_FORWARD(self, jump):
+        self.jump(jump)
+
+    def byte_JUMP_ABSOLUTE(self, jump):
+        self.jump(jump)
+
+    def byte_POP_JUMP_IF_TRUE(self, jump):
+        val = self.pop()
+        if val:
+            self.jump(jump)
+
+    def byte_POP_JUMP_IF_FALSE(self, jump):
+        val = self.pop()
+        if not val:
+            self.jump(jump)
+
+    def byte_SETUP_LOOP(self, dest):
+        self.push_block('loop', dest)
+
+    def byte_GET_ITER(self):
+        self.push(iter(self.pop()))
+
+    def byte_FOR_ITER(self, jump):
+        iterobj = self.top()
+        try:
+            v = next(iterobj)
+            self.push(v)
+        except StopIteration:
+            self.pop()
+            self.jump(jump)
+
+    def byte_BREAK_LOOP(self):
+        return 'break'
+
+    def byte_POP_BLOCK(self):
+        self.pop_block()
+
+    def byte_MAKE_FUNCTION(self, argc):
+        name = self.pop()
+        code = self.pop()
+        defaults = self.popn(argc)
+        globs = self.frame.global_names
+        fn = Function(name, code, globs, defaults, None, self)
+        self.push(fn)
+
+    def byte_CALL_FUNCTION(self, argc):
+        lenKw, lenPos = divmod(argc, 256)
+        posargs = self.popn(lenPos)
+
+        func = self.pop()
+        frame = self.frame
+        retval = func(*posargs)
+        self.push(retval)
+
+    def byte_RETURN_VALUE(self):
+        self.return_value = self.pop()
+        return 'return'
+
+# Example of how to use the bytecode interpreter
+
+txt = """\
+def loop():
+    x = 1
+    while x < 5:
+        x = x + 1
+    return x
+print(loop())
+"""
+
+code = textwrap.dedent(txt)
+code = compile(code, "<%s>" % __name__, "exec", 0, 1)
+#dis.dis(code)
+
+vm = VirtualMachine()
+vm.run_code(code)
