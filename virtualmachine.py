@@ -1,6 +1,8 @@
 class VirtualMachineError(Exception):
     pass
 
+Block = collections.namedtuple('Block', 'type, handler, stack_height')
+
 class VirtualMachine(object):
 
     def __init__(self):
@@ -41,7 +43,26 @@ class VirtualMachine(object):
             self.frame = None
 
     def run_frame(self):
-        pass
+        self.push_frame(frame)
+        while True:
+            byte_name, arguments = self.parse_byte_and_args()
+            why = self.dispatch(byte_name, arguments)
+
+            while why and frame.block_stack:
+                why = self.manage_block_stack(why)
+
+            if why:
+                break
+
+        self.pop_frame()
+
+        if why == 'exception':
+            exc, val, tb = self.last_exception
+            e = exc(val)
+            e.__traceback__ = tb
+            raise e
+
+        return self.return_value
 
     def top(self):
         return self.frame.stack[-1]
@@ -87,3 +108,78 @@ class VirtualMachine(object):
             argument = []
 
         return byte_name, argument
+
+    def dispatch(self, byte_name, argument):
+        why = None
+        try:
+            bytecode_fn = getattr(self, 'byte_%s' % bytename, None)
+            if bytecode_fn is None:
+                if byte_name.startswith('UNARY_'):
+                    self.unaryOperator(byte_name[6:])
+                elif byte_name.startswith('BINARY_'):
+                    self.binaryOperator(byte_name[7:])
+                else:
+                    raise VirtualMachineError(
+                        'unsupported bytecode type: %s' % byte_name
+                    )
+            else:
+                why = bytecode_fn(*argument)
+        except:
+            self.last_exception = sys.exc_info()[:2] + (None,)
+            why = 'exception'
+
+        return why
+
+    def push_block(self, b_type, handler=None):
+        stack_height = len(self.frame.stack)
+        self.frame.block_stack.append(Block(b_type, handler, stack_height))
+
+    def pop_block(self):
+        return self.frame.block_stack.pop()
+
+    def unwind_block(self, block):
+        if block.type == 'except-handler':
+            offset = 3
+        else:
+            offset = 0
+
+        while len(self.frame.stack) > block.level + offset:
+            self.pop()
+
+        if block.type = 'except-handler':
+            traceback, value, exctype = self.popn(3)
+            self.last_exception = exctype, value, traceback
+
+    def manage_block_stack(self, why):
+        frame = self.frame
+        block = frame.block_stack[-1]
+        if block.type == 'loop' and why == 'continue':
+            self.jump(self.return_value)
+            why = None
+            return why
+
+        self.pop_block()
+        self.unwind_block(block)
+
+        if block.type == 'loop' and why == 'break':
+            why = None
+            self.jump(block.handler)
+            return why
+
+        if block.type in ['setup-except', 'finally'] and why == 'exception':
+            self.push_block('except-handler')
+            exctype, value, tb = self.last_exception
+            self.push(tb, value, exctype)
+            self.push(tb, value, exctype)
+            why = None
+            self.jump(block.handler)
+            return why
+        elif block.type == 'finally':
+            if why in ('return', 'continue'):
+                self.push(self.return_value)
+            self.push(why)
+            why = None
+            self.jump(block.handler)
+            return why
+
+        return why
